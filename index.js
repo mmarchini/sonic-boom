@@ -164,6 +164,10 @@ function SonicBoom (opts) {
       this._len = 0
     }
 
+    if (this._len > 0 && this._writingBuf.length === 0 && this._bufs.length === 0) {
+      this._len = 0
+    }
+
     // TODO if we have a multi-byte character in the buffer, we need to
     // n might not be the same as this._writingBuf.length, so we might loose
     // characters here. The solution to this problem is to use a Buffer for _writingBuf.
