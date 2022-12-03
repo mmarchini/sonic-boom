@@ -12,6 +12,20 @@ const BUSY_WRITE_TIMEOUT = 100
 // https://github.com/moby/moby/blob/513ec73831269947d38a644c278ce3cac36783b2/daemon/logger/copier.go#L13
 const MAX_WRITE = 16 * 1024
 
+let debug = function debug (funcName, step, stream, ctx) {
+  console.error('[' + funcName + '][' + step + '] ' + streamToDebug(stream))
+}
+
+function streamToDebug (stream) {
+  const bufs = (stream._bufs || []).map((b) => b.length)
+  return JSON.stringify({
+    _len: stream._len,
+    _bufs: stream._bufs.length,
+    '_bufs.sum': bufs.reduce((a, b) => (a + b), 0),
+    '_writingBuf.length': stream._writingBuf.length
+  })
+}
+
 function openFile (file, sonic) {
   sonic._opening = true
   sonic._writing = true
@@ -125,6 +139,7 @@ function SonicBoom (opts) {
   }
 
   this.release = (err, n) => {
+    debug('release', 'begin', this, { err, n })
     if (err) {
       if (err.code === 'EAGAIN' && this.retryEAGAIN(err, this._writingBuf.length, this._len - this._writingBuf.length)) {
         if (this.sync) {
@@ -152,6 +167,7 @@ function SonicBoom (opts) {
       return
     }
 
+    debug('release', 'emitWrite', this, { n })
     this.emit('write', n)
 
     this._len -= n
@@ -165,15 +181,18 @@ function SonicBoom (opts) {
     }
 
     if (this._len > 0 && this._writingBuf.length === 0 && this._bufs.length === 0) {
-      this._len = 0
+      debug = () => {}
+      // this._len = 0
     }
 
     // TODO if we have a multi-byte character in the buffer, we need to
     // n might not be the same as this._writingBuf.length, so we might loose
     // characters here. The solution to this problem is to use a Buffer for _writingBuf.
     this._writingBuf = this._writingBuf.slice(n)
+    debug('release', 'slice buffer', this)
 
     if (this._writingBuf.length) {
+      debug('release', 'more to write', this)
       if (!this.sync) {
         fs.write(this.fd, this._writingBuf, 'utf8', this.release)
         return
@@ -192,31 +211,41 @@ function SonicBoom (opts) {
     }
 
     if (this._fsync) {
+      debug('release', 'fsync', this)
       fs.fsyncSync(this.fd)
     }
 
     const len = this._len
     if (this._reopening) {
+      debug('release', '1', this)
       this._writing = false
       this._reopening = false
       this.reopen()
     } else if (len > this.minLength) {
+      debug('release', '2', this)
       actualWrite(this)
     } else if (this._ending) {
+      debug('release', '3', this)
       if (len > 0) {
+        debug('release', '3.1', this)
         actualWrite(this)
       } else {
+        debug('release', '3.2', this)
         this._writing = false
         actualClose(this)
       }
     } else {
+      debug('release', '4', this)
       this._writing = false
       if (this.sync) {
+        debug('release', '4.1', this)
         if (!this._asyncDrainScheduled) {
+          debug('release', '4.1.1', this)
           this._asyncDrainScheduled = true
           process.nextTick(emitDrain, this)
         }
       } else {
+        debug('release', '4.2', this)
         this.emit('drain')
       }
     }
@@ -230,6 +259,7 @@ function SonicBoom (opts) {
 }
 
 function emitDrain (sonic) {
+  debug('emitDrain', 'begin', sonic)
   const hasListeners = sonic.listenerCount('drain') > 0
   if (!hasListeners) return
   sonic._asyncDrainScheduled = false
@@ -239,37 +269,45 @@ function emitDrain (sonic) {
 inherits(SonicBoom, EventEmitter)
 
 SonicBoom.prototype.write = function (data) {
+  debug('write', 'begin', this)
   if (this.destroyed) {
     throw new Error('SonicBoom destroyed')
   }
 
   const len = this._len + data.length
   const bufs = this._bufs
+  debug('write', 'after len', this)
 
   if (this.maxLength && len > this.maxLength) {
     this.emit('drop', data)
     return this._len < this._hwm
   }
+  debug('write', 'after maxLen', this)
 
   if (
     bufs.length === 0 ||
     bufs[bufs.length - 1].length + data.length > this.maxWrite
   ) {
+    debug('write', '1', this)
     bufs.push('' + data)
   } else {
+    debug('write', '2', this)
     bufs[bufs.length - 1] += data
   }
 
   this._len = len
 
   if (!this._writing && this._len >= this.minLength) {
+    debug('write', 'calling actualWrite', this)
     actualWrite(this)
   }
 
+  debug('write', 'calling actualWrite', this, { hwm: this._hwm })
   return this._len < this._hwm
 }
 
 SonicBoom.prototype.flush = function () {
+  debug('flush', 'begin', this)
   if (this.destroyed) {
     throw new Error('SonicBoom destroyed')
   }
@@ -286,6 +324,7 @@ SonicBoom.prototype.flush = function () {
 }
 
 SonicBoom.prototype.reopen = function (file) {
+  debug('reopen', 'begin', this)
   if (this.destroyed) {
     throw new Error('SonicBoom destroyed')
   }
@@ -326,6 +365,7 @@ SonicBoom.prototype.reopen = function (file) {
 }
 
 SonicBoom.prototype.end = function () {
+  debug('end', 'begin', this)
   if (this.destroyed) {
     throw new Error('SonicBoom destroyed')
   }
@@ -355,6 +395,7 @@ SonicBoom.prototype.end = function () {
 }
 
 SonicBoom.prototype.flushSync = function () {
+  debug('flushSync', 'begin', this)
   if (this.destroyed) {
     throw new Error('SonicBoom destroyed')
   }
@@ -369,6 +410,7 @@ SonicBoom.prototype.flushSync = function () {
   }
 
   while (this._bufs.length) {
+    debug('flushSync', 'begin loop', this)
     const buf = this._bufs[0]
     try {
       this._len -= fs.writeSync(this.fd, buf, 'utf8')
@@ -384,6 +426,7 @@ SonicBoom.prototype.flushSync = function () {
 }
 
 SonicBoom.prototype.destroy = function () {
+  debug('destroy', 'begin', this)
   if (this.destroyed) {
     return
   }
@@ -391,6 +434,7 @@ SonicBoom.prototype.destroy = function () {
 }
 
 function actualWrite (sonic) {
+  debug('actualWrite', 'begin', sonic)
   const release = sonic.release
   sonic._writing = true
   sonic._writingBuf = sonic._writingBuf || sonic._bufs.shift() || ''
@@ -408,6 +452,7 @@ function actualWrite (sonic) {
 }
 
 function actualClose (sonic) {
+  debug('actualClose', 'begin', sonic)
   if (sonic.fd === -1) {
     sonic.once('ready', actualClose.bind(null, sonic))
     return
